@@ -1327,12 +1327,13 @@ func HandleConvertWarning(ctx *Context, err error) bool {
 	return true
 }
 
-// HandleDataTruncation returns [ErrDataTruncatedForColumn] in strict SQL mode
-// or records a truncation warning on |ctx| otherwise.
-func HandleDataTruncation(ctx *Context, colName string) error {
+// WarnOrError returns |err| in strict SQL mode, or records it as a warning on
+// |ctx| using its MySQL error code otherwise.
+func WarnOrError(ctx *Context, err error) error {
 	if LoadSqlMode(ctx).Strict() {
-		return ErrDataTruncatedForColumn.New(colName)
+		return err
 	}
-	ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", colName)
+	sqlErr := CastSQLError(err)
+	ctx.Warn(sqlErr.Num, "%s", sqlErr.Message)
 	return nil
 }

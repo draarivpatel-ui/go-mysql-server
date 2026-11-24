@@ -857,7 +857,7 @@ func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.Rewritable
 				return err
 			}
 			if truncated {
-				if err := sql.HandleDataTruncation(ctx, colName); err != nil {
+				if err := sql.WarnOrError(ctx, types.ErrDataTruncatedForColumn.New(colName)); err != nil {
 					return err
 				}
 			}
