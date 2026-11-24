@@ -365,23 +365,26 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		if oldBits > maxBits {
 			return nil, false, sql.ErrInvalidSetValue.New(oldBits)
 		}
-		// Isolate the lowest set bit with x & -x to check whether the empty-string
-		// member is the leading element, and clear it with &^= if so.
+		// Match comma-delimited reparsing: if the lowest set bit (oldBits & -oldBits)
+		// is the empty-string member, drop it first so ",a" behaves like "a".
 		if emptyBit != 0 && oldBits&-oldBits == emptyBit {
 			oldBits &^= emptyBit
 		}
-		// When exactly one bit is set (OnesCount64 == 1) and that member has a
-		// numeric fallback, TrailingZeros64 yields its 0-based member index.
+		// If only one member remains (OnesCount64 == 1) and it did not match by name
+		// but parses as a valid target bitmask, return that numeric fallback instead
+		// of truncating (TrailingZeros64 gives the member's 0-based index).
 		if bits.OnesCount64(oldBits) == 1 && oldBits&numFallbackMask != 0 {
 			return numFallback[bits.TrailingZeros64(oldBits)], false, nil
 		}
-		// Clear dropped bits with &^, then visit each remaining set bit by reading
-		// its index via TrailingZeros64 and stripping the lowest set bit via rest & (rest - 1).
+		// Otherwise, translate every surviving member to its new bit position in
+		// dstType: mask out removed members (&^ droppedMask), then walk set bits via
+		// TrailingZeros64 and clear the lowest set bit each step (rest &= rest - 1).
 		var remapped uint64
 		for rest := oldBits &^ droppedMask; rest != 0; rest &= rest - 1 {
 			remapped |= remap[bits.TrailingZeros64(rest)]
 		}
-		// Report truncation when any bit in oldBits was marked in droppedMask.
+		// Any bit set in both oldBits and droppedMask represents a removed member
+		// that was dropped from the value, signaling truncation.
 		return remapped, oldBits&droppedMask != 0, nil
 	}, true
 }
