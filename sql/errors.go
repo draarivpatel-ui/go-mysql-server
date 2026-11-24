@@ -1326,14 +1326,3 @@ func HandleConvertWarning(ctx *Context, err error) bool {
 	}
 	return true
 }
-
-// WarnOrError returns |err| in strict SQL mode, or records it as a warning on
-// |ctx| using its MySQL error code otherwise.
-func WarnOrError(ctx *Context, err error) error {
-	if LoadSqlMode(ctx).Strict() {
-		return err
-	}
-	sqlErr := CastSQLError(err)
-	ctx.Warn(sqlErr.Num, "%s", sqlErr.Message)
-	return nil
-}

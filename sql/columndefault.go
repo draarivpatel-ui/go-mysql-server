@@ -112,7 +112,7 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 			return nil, ErrIncompatibleDefaultType.Wrap(err)
 		}
 		if truncated {
-			if err := WarnOrError(ctx, ErrDataTruncatedForColumn.New(e.ColName)); err != nil {
+			if err := ctx.WarnStrict(ErrDataTruncatedForColumn.New(e.ColName)); err != nil {
 				return nil, err
 			}
 		}
