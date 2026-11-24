@@ -365,17 +365,23 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		if oldBits > maxBits {
 			return nil, false, sql.ErrInvalidSetValue.New(oldBits)
 		}
-		// x & -x isolates the lowest set bit of x.
+		// Isolate the lowest set bit with x & -x to check whether the empty-string
+		// member is the leading element, and clear it with &^= if so.
 		if emptyBit != 0 && oldBits&-oldBits == emptyBit {
 			oldBits &^= emptyBit
 		}
+		// When exactly one bit is set (OnesCount64 == 1) and that member has a
+		// numeric fallback, TrailingZeros64 yields its 0-based member index.
 		if bits.OnesCount64(oldBits) == 1 && oldBits&numFallbackMask != 0 {
 			return numFallback[bits.TrailingZeros64(oldBits)], false, nil
 		}
+		// Clear dropped bits with &^, then visit each remaining set bit by reading
+		// its index via TrailingZeros64 and stripping the lowest set bit via rest & (rest - 1).
 		var remapped uint64
 		for rest := oldBits &^ droppedMask; rest != 0; rest &= rest - 1 {
 			remapped |= remap[bits.TrailingZeros64(rest)]
 		}
+		// Report truncation when any bit in oldBits was marked in droppedMask.
 		return remapped, oldBits&droppedMask != 0, nil
 	}, true
 }
