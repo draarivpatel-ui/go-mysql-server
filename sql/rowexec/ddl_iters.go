@@ -358,12 +358,6 @@ type modifyColumnIter struct {
 	overrides sql.EngineOverrides
 	runner    sql.StatementRunner
 	runOnce   bool
-	// deferChecks skips CHECK validation during table rewrites so an enclosing
-	// alterBlockIter can validate once after all clauses finish.
-	deferChecks bool
-	// checksDeferred reports whether this clause actually rewrote the table with
-	// CHECK validation skipped (metadata-only alters leave it false).
-	checksDeferred bool
 }
 
 func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
@@ -371,16 +365,25 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 		return nil, io.EOF
 	}
 	i.runOnce = true
+	if _, err := i.execute(ctx, false); err != nil {
+		return nil, err
+	}
+	return sql.NewRow(types.NewOkResult(0)), nil
+}
 
+// execute applies the column modification and reports whether it rewrote the
+// table's rows. When |deferChecks| is true, CHECK validation is skipped during
+// a rewrite so an enclosing alterBlockIter can validate once after all clauses.
+func (i *modifyColumnIter) execute(ctx *sql.Context, deferChecks bool) (bool, error) {
 	idx := i.m.TargetSchema().IndexOf(i.m.Column(), i.alterable.Name())
 	if idx < 0 {
-		return nil, sql.ErrTableColumnNotFound.New(i.alterable.Name(), i.m.Column())
+		return false, sql.ErrTableColumnNotFound.New(i.alterable.Name(), i.m.Column())
 	}
 
 	if i.m.Order(ctx) != nil && !i.m.Order(ctx).First {
 		idx = i.m.TargetSchema().IndexOf(i.m.Order(ctx).AfterColumn, i.alterable.Name())
 		if idx < 0 {
-			return nil, sql.ErrTableColumnNotFound.New(i.alterable.Name(), i.m.Order(ctx).AfterColumn)
+			return false, sql.ErrTableColumnNotFound.New(i.alterable.Name(), i.m.Order(ctx).AfterColumn)
 		}
 	}
 
@@ -392,11 +395,11 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 		usedInFk := false
 		fks, err := fkTable.GetDeclaredForeignKeys(ctx)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		parentFks, err := fkTable.GetReferencedForeignKeys(ctx)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 	OuterChildFk:
 		for _, foreignKey := range fks {
@@ -430,13 +433,13 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 						oldType := tblSch[idx].Type.(sql.StringType)
 						newType := i.m.NewColumn().Type.(sql.StringType)
 						if oldType.Collation() != newType.Collation() || oldType.MaxCharacterLength() > newType.MaxCharacterLength() {
-							return nil, sql.ErrForeignKeyTypeChange.New(i.m.Column())
+							return false, sql.ErrForeignKeyTypeChange.New(i.m.Column())
 						}
 					default:
-						return nil, sql.ErrForeignKeyTypeChange.New(i.m.Column())
+						return false, sql.ErrForeignKeyTypeChange.New(i.m.Column())
 					}
 				} else {
-					return nil, sql.ErrForeignKeyTypeChange.New(i.m.Column())
+					return false, sql.ErrForeignKeyTypeChange.New(i.m.Column())
 				}
 			}
 			if !i.m.NewColumn().Nullable {
@@ -445,7 +448,7 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 					if fk.OnUpdate == sql.ForeignKeyReferentialAction_SetNull || fk.OnDelete == sql.ForeignKeyReferentialAction_SetNull {
 						for _, col := range fk.Columns {
 							if lowerColName == strings.ToLower(col) {
-								return nil, sql.ErrForeignKeyTypeChangeSetNull.New(i.m.Column(), fk.Name)
+								return false, sql.ErrForeignKeyTypeChangeSetNull.New(i.m.Column(), fk.Name)
 							}
 						}
 					}
@@ -453,7 +456,7 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 			}
 			err = handleFkColumnRename(ctx, fkTable, i.m.Db, i.m.Column(), i.m.NewColumn().Name)
 			if err != nil {
-				return nil, err
+				return false, err
 			}
 		}
 	}
@@ -463,41 +466,41 @@ func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
 
 	// TODO: replace with different node in analyzer
 	if rwt, ok := i.alterable.(sql.RewritableTable); ok {
-		rewritten, err := i.rewriteTable(ctx, rwt)
+		rewritten, err := i.rewriteTable(ctx, rwt, deferChecks)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		if rewritten {
 			if i.overrides.Hooks.TableModifyColumn.PostSQLExecution != nil {
 				if err = i.overrides.Hooks.TableModifyColumn.PostSQLExecution(ctx, i.runner, i.m); err != nil {
-					return nil, err
+					return false, err
 				}
 			}
-			return sql.NewRow(types.NewOkResult(0)), nil
+			return true, nil
 		}
 	}
 
 	// TODO: fix me
 	if err := updateDefaultsOnColumnRename(ctx, i.alterable, i.m.TargetSchema(), i.m.Column(), i.m.NewColumn().Name); err != nil {
-		return nil, err
+		return false, err
 	}
 
 	err := i.alterable.ModifyColumn(ctx, i.m.Column(), i.m.NewColumn(), i.m.Order(ctx))
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
 	if hasFullText {
 		if err = rebuildFullText(ctx, i.alterable.Name(), i.m.Db); err != nil {
-			return nil, err
+			return false, err
 		}
 	}
 	if i.overrides.Hooks.TableModifyColumn.PostSQLExecution != nil {
 		if err = i.overrides.Hooks.TableModifyColumn.PostSQLExecution(ctx, i.runner, i.m); err != nil {
-			return nil, err
+			return false, err
 		}
 	}
-	return sql.NewRow(types.NewOkResult(0)), nil
+	return false, nil
 }
 
 func handleFkColumnRename(ctx *sql.Context, fkTable sql.ForeignKeyTable, db sql.Database, oldName string, newName string) error {
@@ -616,7 +619,7 @@ func (i *modifyColumnIter) Close(context *sql.Context) error {
 }
 
 // rewriteTable rewrites the table given if required or requested, and returns whether it was rewritten
-func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTable) (bool, error) {
+func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTable, deferChecks bool) (bool, error) {
 	// Earlier clauses in a multi-column ALTER may already have rewritten the table.
 	// Start from its current schema so their renamed columns and expressions survive.
 	// Persisted defaults also need resolving to preserve their literal classification.
@@ -671,8 +674,8 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 
 	var reencode sql.ReencodeFunc
 	if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok && !recomputeGenerated {
-		reencode, _ = r.NewReencoder(newCol.Type)
-		rewriteRequired = rewriteRequired || reencode != nil
+		reencode, ok = r.NewReencoder(newCol.Type)
+		rewriteRequired = rewriteRequired || ok
 	}
 
 	// TODO: codify rewrite requirements
@@ -682,7 +685,7 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 	}
 
 	var checks sql.CheckConstraints
-	if !i.deferChecks {
+	if !deferChecks {
 		checks, err = planbuilder.BindEnforcedChecks(ctx, i.overrides, i.m.Db.Name(), rwt, newSch)
 		if err != nil {
 			return false, err
@@ -694,7 +697,42 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		return false, err
 	}
 
-	if err = i.rewriteTableRows(ctx, rwt, inserter, newSch, projections, checks, oldColIdx, newCol.Name, reencode); err != nil {
+	var rowBuf sql.Row
+	err = forEachTableRow(ctx, rwt, func(r sql.Row) error {
+		if reencode != nil && r[oldColIdx] != nil {
+			reencoded, truncated, err := reencode(r[oldColIdx])
+			if err != nil {
+				return err
+			}
+			if truncated {
+				if err := ctx.WarnStrict(types.ErrDataTruncatedForColumn.New(newCol.Name)); err != nil {
+					return err
+				}
+			}
+			// Copy before mutating so a failed ALTER leaves backing slices untouched.
+			rowBuf = append(rowBuf[:0], r...)
+			rowBuf[oldColIdx] = reencoded
+			r = rowBuf
+		}
+
+		newRow, err := projectRowWithTypes(ctx, newSch, projections, r)
+		if err != nil {
+			return err
+		}
+
+		for idx, col := range newSch {
+			if !col.Nullable && newRow[idx] == nil {
+				return sql.ErrInsertIntoNonNullableProvidedNull.New(col.Name)
+			}
+		}
+
+		if err = checks.Eval(ctx, newRow); err != nil {
+			return err
+		}
+
+		return inserter.Insert(ctx, newRow)
+	})
+	if err != nil {
 		return false, discardAndClose(ctx, inserter, err)
 	}
 
@@ -704,7 +742,6 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		return false, err
 	}
 
-	i.checksDeferred = i.deferChecks
 	return true, nil
 }
 
@@ -779,28 +816,28 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		}
 	}()
 
+	canDeferChecks := sp.ts != nil
 	var (
-		lastRows     = []sql.Row{{types.NewOkResult(0)}}
-		rewrote      *modifyColumnIter
-		rewroteTable string
+		lastRows          = []sql.Row{{types.NewOkResult(0)}}
+		pendingCheckDB    sql.Database
+		pendingCheckTable string
 	)
 	flushDeferredChecks := func() error {
-		if rewrote == nil || sp.ts == nil {
+		if pendingCheckTable == "" {
 			return nil
 		}
-		db := rewrote.m.Database()
-		tbl, ok, err := db.GetTableInsensitive(ctx, rewroteTable)
+		tbl, ok, err := pendingCheckDB.GetTableInsensitive(ctx, pendingCheckTable)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return sql.ErrTableNotFound.New(rewroteTable)
+			return sql.ErrTableNotFound.New(pendingCheckTable)
 		}
-		if err = evalTableChecks(ctx, i.builder.EngineOverrides, db.Name(), tbl); err != nil {
+		if err = evalTableChecks(ctx, i.builder.EngineOverrides, pendingCheckDB.Name(), tbl); err != nil {
 			return err
 		}
-		rewrote = nil
-		rewroteTable = ""
+		pendingCheckDB = nil
+		pendingCheckTable = ""
 		return nil
 	}
 	for _, stmt := range i.block.Children() {
@@ -815,18 +852,23 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		if err != nil {
 			return err
 		}
-		mi, _ := iter.(*modifyColumnIter)
-		if mi != nil {
-			mi.deferChecks = sp.ts != nil
+		if mi, ok := iter.(*modifyColumnIter); ok {
+			rewritten, err := mi.execute(ctx, canDeferChecks)
+			if err != nil {
+				return err
+			}
+			if rewritten && canDeferChecks {
+				pendingCheckDB = mi.m.Database()
+				pendingCheckTable = mi.alterable.Name()
+			}
+			i.repNode = stmt
+			lastRows = []sql.Row{{types.NewOkResult(0)}}
+			continue
 		}
 
 		rows, err := sql.RowIterToRows(ctx, iter)
 		if err != nil {
 			return err
-		}
-		if mi != nil && mi.checksDeferred {
-			rewrote = mi
-			rewroteTable = mi.alterable.Name()
 		}
 		if len(rows) > 0 {
 			i.repNode = stmt
@@ -840,49 +882,6 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 
 	i.internalIter = sql.RowsToRowIter(lastRows...)
 	return nil
-}
-
-// rewriteTableRows streams rows from |rwt| into |inserter| using |projections|
-// for |newSch|, validating nullability and |checks| before inserting each
-// projected row.
-//
-// When |reencode| is non-nil, it re-encodes stored column values on a copied
-// row buffer so a failed ALTER leaves backing slices untouched.
-func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.RewritableTable, inserter sql.RowInserter, newSch sql.Schema, projections []sql.Expression, checks sql.CheckConstraints, oldColIdx int, colName string, reencode sql.ReencodeFunc) error {
-	var rowBuf sql.Row
-	return forEachTableRow(ctx, rwt, func(r sql.Row) error {
-		if reencode != nil && r[oldColIdx] != nil {
-			reencoded, truncated, err := reencode(r[oldColIdx])
-			if err != nil {
-				return err
-			}
-			if truncated {
-				if err := ctx.WarnStrict(types.ErrDataTruncatedForColumn.New(colName)); err != nil {
-					return err
-				}
-			}
-			rowBuf = append(rowBuf[:0], r...)
-			rowBuf[oldColIdx] = reencoded
-			r = rowBuf
-		}
-
-		newRow, err := projectRowWithTypes(ctx, newSch, projections, r)
-		if err != nil {
-			return err
-		}
-
-		for idx, col := range newSch {
-			if !col.Nullable && newRow[idx] == nil {
-				return sql.ErrInsertIntoNonNullableProvidedNull.New(col.Name)
-			}
-		}
-
-		if err = checks.Eval(ctx, newRow); err != nil {
-			return err
-		}
-
-		return inserter.Insert(ctx, newRow)
-	})
 }
 
 // forEachTableRow streams every row in |tbl| to |fn|, closing the underlying

@@ -1999,11 +1999,6 @@ func (b *Builder) resolveColumnDefaultExpression(inScope *scope, columnDef *sql.
 
 	def, ok := colDefault.Expr.(*sql.UnresolvedColumnDefault)
 	if !ok {
-		if colDefault.ColName != columnDef.Name && columnDef.Name != "" {
-			copied := *colDefault
-			copied.ColName = columnDef.Name
-			return &copied
-		}
 		// no resolution work to be done, return the original value
 		return colDefault
 	}
