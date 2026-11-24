@@ -360,7 +360,9 @@ type modifyColumnIter struct {
 	// deferChecks skips CHECK validation during table rewrites. The caller
 	// validates constraints after execution completes.
 	deferChecks bool
-	rewrote     bool
+	// rewrote reports whether this clause rewrote the table so an enclosing
+	// alterBlockIter knows to run deferred CHECK constraints afterwards.
+	rewrote bool
 }
 
 func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {

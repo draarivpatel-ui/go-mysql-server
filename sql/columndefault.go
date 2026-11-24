@@ -85,41 +85,51 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 		return nil, ErrColumnDefaultReturnedNull.New()
 	}
 
-	if e.OutType != nil {
-		var inRange ConvertInRange
-		switch outType := e.OutType.(type) {
-		case RoundingNumberType:
-			val, inRange, err = outType.ConvertRound(ctx, val)
-		case ExtendedType:
-			if exprType, ok := e.Expr.Type(ctx).(ExtendedType); ok && !outType.Equals(exprType) {
-				val, inRange, err = outType.ConvertToType(ctx, exprType, val, 'a')
-			} else {
-				val, inRange, err = e.OutType.Convert(ctx, val)
-			}
-		case ColumnValueReencoder:
-			if reenc, ok := e.Expr.Type(ctx).(ColumnValueReencoder); ok && val != nil {
-				if reencode, needed := reenc.NewReencoder(e.OutType); needed {
-					var truncated bool
-					val, truncated, err = reencode(val)
-					if err == nil && truncated {
-						if LoadSqlMode(ctx).Strict() {
-							return nil, ErrDataTruncatedForColumn.New(e.ColName)
-						}
-						ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", e.ColName)
-					}
-					break
-				}
-			}
-			val, inRange, err = e.OutType.Convert(ctx, val)
-		default:
+	if e.OutType == nil {
+		return val, nil
+	}
+
+	var inRange ConvertInRange
+	switch outType := e.OutType.(type) {
+	case RoundingNumberType:
+		val, inRange, err = outType.ConvertRound(ctx, val)
+	case ExtendedType:
+		if exprType, ok := e.Expr.Type(ctx).(ExtendedType); ok && !outType.Equals(exprType) {
+			val, inRange, err = outType.ConvertToType(ctx, exprType, val, 'a')
+		} else {
 			val, inRange, err = e.OutType.Convert(ctx, val)
 		}
+	case ColumnValueReencoder:
+		reenc, ok := e.Expr.Type(ctx).(ColumnValueReencoder)
+		if !ok || val == nil {
+			val, inRange, err = e.OutType.Convert(ctx, val)
+			break
+		}
+		reencode, needed := reenc.NewReencoder(e.OutType)
+		if !needed {
+			val, inRange, err = e.OutType.Convert(ctx, val)
+			break
+		}
+		var truncated bool
+		val, truncated, err = reencode(val)
 		if err != nil {
 			return nil, ErrIncompatibleDefaultType.Wrap(err)
 		}
-		if inRange != InRange {
-			return nil, ErrValueOutOfRange.New(val, e.OutType)
+		if truncated {
+			if LoadSqlMode(ctx).Strict() {
+				return nil, ErrDataTruncatedForColumn.New(e.ColName)
+			}
+			ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", e.ColName)
 		}
+		return val, nil
+	default:
+		val, inRange, err = e.OutType.Convert(ctx, val)
+	}
+	if err != nil {
+		return nil, ErrIncompatibleDefaultType.Wrap(err)
+	}
+	if inRange != InRange {
+		return nil, ErrValueOutOfRange.New(val, e.OutType)
 	}
 
 	return val, nil

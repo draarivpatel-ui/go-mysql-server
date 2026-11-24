@@ -505,7 +505,8 @@ func IsDDLNode(node sql.Node) bool {
 		*CreateForeignKey, *DropForeignKey,
 		*CreateCheck, *DropCheck,
 		*CreateTrigger, *DropTrigger, *AlterPK,
-		*Block, *AlterBlock: // Block as a top level node wraps a set of ALTER TABLE statements
+		// Keep *Block for callers that still wrap DDL clauses in a top-level Block.
+		*Block, *AlterBlock:
 		return true
 	default:
 		return false
