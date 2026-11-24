@@ -665,10 +665,12 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		rewriteRequired = true
 	}
 
-	var reencoder sql.ColumnValueReencoder
-	if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok && r.RequiresReencoding(newCol.Type) {
-		reencoder = r
-		rewriteRequired = true
+	var reencode sql.ReencodeFunc
+	if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok {
+		if fn, needed := r.NewReencoder(newCol.Type); needed {
+			reencode = fn
+			rewriteRequired = true
+		}
 	}
 
 	// TODO: codify rewrite requirements
@@ -690,7 +692,7 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		return false, err
 	}
 
-	if err = i.rewriteTableRows(ctx, rwt, inserter, newSch, projections, checks, oldColIdx, newCol, reencoder, recomputeGenerated); err != nil {
+	if err = i.rewriteTableRows(ctx, rwt, inserter, newSch, projections, checks, oldColIdx, newCol, reencode, recomputeGenerated); err != nil {
 		return false, discardAndClose(ctx, inserter, err)
 	}
 
@@ -827,13 +829,13 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 // for |newSch|, validating nullability and |checks| before inserting each
 // projected row.
 //
-// When |reencoder| is non-nil, it re-encodes stored column values on a copied
+// When |reencode| is non-nil, it re-encodes stored column values on a copied
 // row buffer so a failed ALTER leaves backing slices untouched.
-func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.RewritableTable, inserter sql.RowInserter, newSch sql.Schema, projections []sql.Expression, checks sql.CheckConstraints, oldColIdx int, newCol *sql.Column, reencoder sql.ColumnValueReencoder, recomputeGenerated bool) error {
+func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.RewritableTable, inserter sql.RowInserter, newSch sql.Schema, projections []sql.Expression, checks sql.CheckConstraints, oldColIdx int, newCol *sql.Column, reencode sql.ReencodeFunc, recomputeGenerated bool) error {
 	var rowBuf sql.Row
 	return forEachTableRow(ctx, rwt, func(r sql.Row) error {
-		if reencoder != nil && !recomputeGenerated && r[oldColIdx] != nil {
-			reencoded, truncated, err := reencoder.Reencode(r[oldColIdx], newCol.Type)
+		if reencode != nil && !recomputeGenerated && r[oldColIdx] != nil {
+			reencoded, truncated, err := reencode(r[oldColIdx])
 			if err != nil {
 				return err
 			}

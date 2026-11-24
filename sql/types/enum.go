@@ -392,26 +392,33 @@ func (t EnumType) RequiresReencoding(dstType sql.Type) bool {
 	return ok && !t.IsSubsetOf(newEnum)
 }
 
-// Reencode implements [sql.ColumnValueReencoder] by translating a stored enum
-// ordinal from |t| to |dstType| by member name, preserving error ordinal 0.
+// NewReencoder implements [sql.ColumnValueReencoder] by precomputing an
+// ordinal translation table from |t| to |dstType| by member name, preserving
+// error ordinal 0.
 //
 // Stored ordinals are position-based, so reordering, inserting, or removing
 // members requires re-encoding by name to preserve logical values.
-func (t EnumType) Reencode(val any, dstType sql.Type) (any, bool, error) {
-	newEnum, ok := dstType.(sql.EnumType)
-	if !ok {
-		return nil, false, sql.ErrInvalidType.New(dstType)
+func (t EnumType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
+	if !t.RequiresReencoding(dstType) {
+		return nil, false
 	}
-	oldIdx := int(val.(uint16))
-	if oldIdx == 0 {
-		return uint16(0), false, nil
+	newEnum := dstType.(sql.EnumType)
+	remap := make([]uint16, len(t.idxToVal)+1)
+	for i, member := range t.idxToVal {
+		if newIdx := newEnum.IndexOf(member); newIdx > 0 {
+			remap[i+1] = uint16(newIdx)
+		}
 	}
-	oldStr, _ := t.At(oldIdx)
-	newIdx := newEnum.IndexOf(oldStr)
-	if newIdx == -1 {
-		return uint16(0), true, nil
-	}
-	return uint16(newIdx), false, nil
+	return func(val any) (any, bool, error) {
+		oldIdx := int(val.(uint16))
+		if oldIdx == 0 {
+			return uint16(0), false, nil
+		}
+		if oldIdx < 0 || oldIdx >= len(remap) || remap[oldIdx] == 0 {
+			return uint16(0), true, nil
+		}
+		return remap[oldIdx], false, nil
+	}, true
 }
 
 // NumberOfElements implements EnumType interface.

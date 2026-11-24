@@ -85,31 +85,34 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 
 	if e.OutType != nil {
 		var inRange ConvertInRange
-		if roundType, isRoundType := e.OutType.(RoundingNumberType); isRoundType {
-			val, inRange, err = roundType.ConvertRound(ctx, val)
-		} else if outType, isOutExtended := e.OutType.(ExtendedType); isOutExtended {
-			if exprType, isExprExtended := e.Expr.Type(ctx).(ExtendedType); isExprExtended && !outType.Equals(exprType) {
+		switch outType := e.OutType.(type) {
+		case RoundingNumberType:
+			val, inRange, err = outType.ConvertRound(ctx, val)
+		case ExtendedType:
+			if exprType, ok := e.Expr.Type(ctx).(ExtendedType); ok && !outType.Equals(exprType) {
 				val, inRange, err = outType.ConvertToType(ctx, exprType, val, 'a')
 			} else {
 				val, inRange, err = e.OutType.Convert(ctx, val)
 			}
-		} else if _, ok := e.OutType.(ColumnValueReencoder); ok {
-			if reenc, ok := e.Expr.Type(ctx).(ColumnValueReencoder); ok && val != nil && reenc.RequiresReencoding(e.OutType) {
-				var truncated bool
-				val, truncated, err = reenc.Reencode(val, e.OutType)
-				if err == nil && truncated {
-					if LoadSqlMode(ctx).Strict() {
-						// ColumnDefaultValue does not store its column name. Callers
-						// that know the target column replace this with the named error.
-						err = ErrDataTruncatedForColumn.New("")
-					} else {
-						ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column")
+		case ColumnValueReencoder:
+			if reenc, ok := e.Expr.Type(ctx).(ColumnValueReencoder); ok && val != nil {
+				if reencode, needed := reenc.NewReencoder(e.OutType); needed {
+					var truncated bool
+					val, truncated, err = reencode(val)
+					if err == nil && truncated {
+						if LoadSqlMode(ctx).Strict() {
+							// ColumnDefaultValue does not store its column name. Callers
+							// that know the target column replace this with the named error.
+							err = ErrDataTruncatedForColumn.New("")
+						} else {
+							ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column")
+						}
 					}
+					break
 				}
-			} else {
-				val, inRange, err = e.OutType.Convert(ctx, val)
 			}
-		} else {
+			val, inRange, err = e.OutType.Convert(ctx, val)
+		default:
 			val, inRange, err = e.OutType.Convert(ctx, val)
 		}
 		if err != nil {

@@ -331,8 +331,8 @@ func (t SetType) RequiresReencoding(dstType sql.Type) bool {
 		!slices.Equal(t.members, ot.members[:len(t.members)]))
 }
 
-// Reencode implements [sql.ColumnValueReencoder] by translating a stored SET
-// bitmask from |t| to |dstType| by member name.
+// NewReencoder implements [sql.ColumnValueReencoder] by precomputing a
+// per-bit translation table from |t| to |dstType| by member name.
 //
 // Stored bit positions are tied to member order, so reordering, inserting,
 // removing, or re-collating members requires re-encoding by name to preserve
@@ -341,37 +341,56 @@ func (t SetType) RequiresReencoding(dstType sql.Type) bool {
 // Reparsing matches comma-delimited string semantics: a leading empty-string
 // member is dropped, and a single unmatched member that parses as a valid
 // bitmask of |dstType| converts numerically.
-func (t SetType) Reencode(val any, dstType sql.Type) (any, bool, error) {
-	oldBits, ok := val.(uint64)
-	if !ok {
-		return nil, false, sql.ErrInvalidType.New(val)
+func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
+	if !t.RequiresReencoding(dstType) {
+		return nil, false
 	}
-	ot, ok := dstType.(SetType)
-	if !ok {
-		return nil, false, sql.ErrInvalidType.New(dstType)
-	}
-	if oldBits > t.allValuesBitField() {
-		return nil, false, sql.ErrInvalidSetValue.New(oldBits)
-	}
-	// x & -x isolates the lowest set bit of x.
-	if emptyBit, ok := t.valToBit[""]; ok && oldBits&-oldBits == emptyBit {
-		oldBits &^= emptyBit
-	}
+	ot := dstType.(SetType)
+	maxBits := t.allValuesBitField()
+	emptyBit := t.valToBit[""]
 
-	var remapped uint64
-	var truncated bool
-	single := bits.OnesCount64(oldBits) == 1
-	for rest := oldBits; rest != 0; rest &= rest - 1 {
-		member := t.members[bits.TrailingZeros64(rest)]
+	var (
+		remap           [64]uint64
+		numFallback     [64]uint64
+		numFallbackMask uint64
+		droppedMask     uint64
+	)
+	for i, member := range t.members {
 		if bit, ok := ot.lookupBit(member); ok {
-			remapped |= bit
-		} else if num, ok := ot.parseBitmask(member); ok && single {
-			return num, false, nil
+			remap[i] = bit
 		} else {
-			truncated = true
+			bit := uint64(1) << uint(i)
+			droppedMask |= bit
+			if num, ok := ot.parseBitmask(member); ok {
+				numFallback[i] = num
+				numFallbackMask |= bit
+			}
 		}
 	}
-	return remapped, truncated, nil
+
+	return func(val any) (any, bool, error) {
+		oldBits, ok := val.(uint64)
+		if !ok {
+			return nil, false, sql.ErrInvalidType.New(val)
+		}
+		if oldBits > maxBits {
+			return nil, false, sql.ErrInvalidSetValue.New(oldBits)
+		}
+		// x & -x isolates the lowest set bit of x.
+		if emptyBit != 0 && oldBits&-oldBits == emptyBit {
+			oldBits &^= emptyBit
+		}
+		if bits.OnesCount64(oldBits) == 1 && oldBits&numFallbackMask != 0 {
+			return numFallback[bits.TrailingZeros64(oldBits)], false, nil
+		}
+
+		truncated := oldBits&droppedMask != 0
+		var remapped uint64
+		for rest := oldBits &^ droppedMask; rest != 0; rest &= rest - 1 {
+			remapped |= remap[bits.TrailingZeros64(rest)]
+		}
+		return remapped, truncated, nil
+	}, true
 }
 
 // parseBitmask parses |member| as an integer bitmask valid for |t|.

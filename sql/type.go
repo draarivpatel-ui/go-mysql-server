@@ -246,18 +246,23 @@ type YearType interface {
 	Type
 }
 
+// ReencodeFunc translates a non-nil stored value from its source [Type] to a
+// target [Type] and reports whether any data was truncated.
+type ReencodeFunc func(val any) (any, bool, error)
+
 // ColumnValueReencoder is implemented by [Type]s whose stored representation
 // must be re-encoded when converted to a different definition of the same type.
 //
-// Reencode reports whether data was truncated and leaves strict-mode error and
-// warning policy to the caller.
+// The returned [ReencodeFunc] reports whether data was truncated and leaves
+// strict-mode error and warning policy to the caller.
 type ColumnValueReencoder interface {
 	// RequiresReencoding reports whether values stored under the receiver type
 	// must be re-encoded for |dstType|.
 	RequiresReencoding(dstType Type) bool
-	// Reencode translates a non-nil stored value |val| from the receiver type
-	// to |dstType| and reports whether any data was truncated.
-	Reencode(val any, dstType Type) (any, bool, error)
+	// NewReencoder returns a [ReencodeFunc] that translates stored values from
+	// the receiver type to |dstType|, or (nil, false) when no re-encoding is
+	// needed.
+	NewReencoder(dstType Type) (ReencodeFunc, bool)
 }
 
 // SetType represents the SET type.
