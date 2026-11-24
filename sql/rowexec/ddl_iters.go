@@ -857,10 +857,9 @@ func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.Rewritable
 				return err
 			}
 			if truncated {
-				if sql.LoadSqlMode(ctx).Strict() {
-					return types.ErrDataTruncatedForColumn.New(colName)
+				if err := sql.HandleDataTruncation(ctx, colName); err != nil {
+					return err
 				}
-				ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", colName)
 			}
 			rowBuf = append(rowBuf[:0], r...)
 			rowBuf[oldColIdx] = reencoded

@@ -320,17 +320,6 @@ func (t SetType) Collation() sql.CollationID {
 	return t.collation
 }
 
-// requiresReencoding reports whether stored bitmasks must be re-encoded when
-// altering |t| to |dstType|.
-//
-// It returns false when every member of |t| keeps its bit position with an
-// equal collation, allowing append-only changes to skip a table rewrite.
-func (t SetType) requiresReencoding(dstType sql.Type) bool {
-	ot, ok := dstType.(SetType)
-	return ok && (!t.collation.Equals(ot.collation) || len(t.members) > len(ot.members) ||
-		!slices.Equal(t.members, ot.members[:len(t.members)]))
-}
-
 // NewReencoder implements [sql.ColumnValueReencoder] by precomputing a
 // per-bit translation table from |t| to |dstType| by member name.
 //
@@ -398,6 +387,17 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		}
 		return remapped, truncated, nil
 	}, true
+}
+
+// requiresReencoding reports whether stored bitmasks must be re-encoded when
+// altering |t| to |dstType|.
+//
+// It returns false when every member of |t| keeps its bit position with an
+// equal collation, allowing append-only changes to skip a table rewrite.
+func (t SetType) requiresReencoding(dstType sql.Type) bool {
+	ot, ok := dstType.(SetType)
+	return ok && (!t.collation.Equals(ot.collation) || len(t.members) > len(ot.members) ||
+		!slices.Equal(t.members, ot.members[:len(t.members)]))
 }
 
 // parseBitmask parses |member| as an integer bitmask valid for |t|.

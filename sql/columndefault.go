@@ -14,11 +14,7 @@
 
 package sql
 
-import (
-	"fmt"
-
-	"github.com/dolthub/vitess/go/mysql"
-)
+import "fmt"
 
 // ColumnDefaultValue is an expression representing the default value of a column. May represent both a default literal
 // and a default expression. A nil pointer of this type represents an implicit default value and is thus valid, so all
@@ -116,10 +112,9 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 			return nil, ErrIncompatibleDefaultType.Wrap(err)
 		}
 		if truncated {
-			if LoadSqlMode(ctx).Strict() {
-				return nil, ErrDataTruncatedForColumn.New(e.ColName)
+			if err := HandleDataTruncation(ctx, e.ColName); err != nil {
+				return nil, err
 			}
-			ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", e.ColName)
 		}
 		return val, nil
 	default:
