@@ -1238,7 +1238,7 @@ func (i *loggingKeyValueIter) Close(ctx *sql.Context) error {
 // projectRowWithTypes projects the row given with the projections given and additionally converts them to the
 // corresponding types found in the schema given, using the standard type conversion logic.
 func projectRowWithTypes(ctx *sql.Context, newSchema sql.Schema, projections []sql.Expression, r sql.Row) (sql.Row, error) {
-	newRow, err := projectRow(ctx, newSchema, projections, r)
+	newRow, err := ProjectRow(ctx, projections, r)
 	if err != nil {
 		return nil, err
 	}

@@ -1728,6 +1728,40 @@ var AlterTableScripts = []ScriptTest{
 				Query:    "select id, cast(s as char), cast(gen_stored_set as char), cast(gen_virtual_set as char) from t_dep_set order by id;",
 				Expected: []sql.Row{{1, "a", "a", "a"}, {2, nil, nil, nil}},
 			},
+			{
+				Query:    "create table t_trunc_gen (id int primary key, s set('a', 'b'), g set('a') generated always as (s) stored);",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:                           "insert into t_trunc_gen (id, s) values (1, 'b');",
+				Expected:                        []sql.Row{{types.NewOkResult(1)}},
+				ExpectedWarning:                 1265,
+				ExpectedWarningsCount:           1,
+				ExpectedWarningMessageSubstring: "Data truncated for column 'g'",
+			},
+			{
+				Query:    "alter table t_trunc_gen rename column g to g2;",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:                           "insert into t_trunc_gen (id, s) values (2, 'b');",
+				Expected:                        []sql.Row{{types.NewOkResult(1)}},
+				ExpectedWarning:                 1265,
+				ExpectedWarningsCount:           1,
+				ExpectedWarningMessageSubstring: "Data truncated for column 'g2'",
+			},
+			{
+				Query:    "set @@sql_mode = 'STRICT_TRANS_TABLES';",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:       "insert into t_trunc_gen (id, s) values (3, 'b');",
+				ExpectedErr: types.ErrDataTruncatedForColumn,
+			},
+			{
+				Query:       "alter table t_trunc_gen change column s s2 set('a');",
+				ExpectedErr: types.ErrDataTruncatedForColumn,
+			},
 		},
 	},
 	{

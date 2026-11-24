@@ -36,6 +36,10 @@ type ColumnDefaultValue struct {
 	// Parenthesized indicates whether the value was specified in parens or not; this is typically the opposite of the Literal field,
 	// but they can both be false in the case of now/current_timestamp for datetimes and timestamps.
 	Parenthesized bool
+	// ColName is the name of the owning column, used only in truncation
+	// diagnostics. It is populated when the default is bound to a column and
+	// is not serialized.
+	ColName string
 	// TODO: we need a generated marker here so we can tell them apart during analysis, maybe?
 }
 
@@ -101,12 +105,9 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 					val, truncated, err = reencode(val)
 					if err == nil && truncated {
 						if LoadSqlMode(ctx).Strict() {
-							// ColumnDefaultValue does not store its column name. Callers
-							// that know the target column replace this with the named error.
-							err = ErrDataTruncatedForColumn.New("")
-						} else {
-							ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column")
+							return nil, ErrDataTruncatedForColumn.New(e.ColName)
 						}
+						ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", e.ColName)
 					}
 					break
 				}
@@ -247,9 +248,10 @@ func (e *ColumnDefaultValue) WithChildren(ctx *Context, children ...Expression) 
 	if e == nil {
 		isLiteral := len(children[0].Children()) == 0 //impossible to know, best guess
 		return NewColumnDefaultValue(children[0], e.OutType, isLiteral, !isLiteral, true)
-	} else {
-		return NewColumnDefaultValue(children[0], e.OutType, e.Literal, e.Parenthesized, e.ReturnNil)
 	}
+	ne := *e
+	ne.Expr = children[0]
+	return &ne, nil
 }
 
 // CheckType validates that the ColumnDefaultValue has the correct type.

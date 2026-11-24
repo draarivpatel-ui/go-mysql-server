@@ -1000,9 +1000,13 @@ func (b *BaseBuilder) buildRenameColumn(ctx *sql.Context, n *plan.RenameColumn, 
 		}
 	}
 
-	nc := *n.TargetSchema()[idx]
-	nc.Name = n.NewColumnName
-	col := &nc
+	col := n.TargetSchema()[idx].Copy()
+	col.Name = n.NewColumnName
+	for _, cdv := range []*sql.ColumnDefaultValue{col.Default, col.Generated, col.OnUpdate} {
+		if cdv != nil {
+			cdv.ColName = n.NewColumnName
+		}
+	}
 
 	if err := updateDefaultsOnColumnRename(ctx, alterable, n.TargetSchema(), strings.ToLower(n.ColumnName), n.NewColumnName); err != nil {
 		return nil, err

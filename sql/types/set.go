@@ -371,7 +371,14 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 	return func(val any) (any, bool, error) {
 		oldBits, ok := val.(uint64)
 		if !ok {
-			return nil, false, sql.ErrInvalidType.New(val)
+			converted, inRange, err := t.Convert(context.Background(), val)
+			if err != nil {
+				return nil, false, err
+			}
+			if inRange != sql.InRange {
+				return uint64(0), true, nil
+			}
+			oldBits = converted.(uint64)
 		}
 		if oldBits > maxBits {
 			return nil, false, sql.ErrInvalidSetValue.New(oldBits)

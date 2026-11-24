@@ -410,7 +410,18 @@ func (t EnumType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		}
 	}
 	return func(val any) (any, bool, error) {
-		oldIdx := int(val.(uint16))
+		oldVal, ok := val.(uint16)
+		if !ok {
+			converted, inRange, err := t.Convert(context.Background(), val)
+			if err != nil {
+				return nil, false, err
+			}
+			if inRange != sql.InRange {
+				return uint16(0), true, nil
+			}
+			oldVal = converted.(uint16)
+		}
+		oldIdx := int(oldVal)
 		if oldIdx == 0 {
 			return uint16(0), false, nil
 		}

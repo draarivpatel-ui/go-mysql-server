@@ -381,15 +381,6 @@ func ProjectRow(
 	projections []sql.Expression,
 	row sql.Row,
 ) (sql.Row, error) {
-	return projectRow(ctx, nil, projections, row)
-}
-
-func projectRow(
-	ctx *sql.Context,
-	schema sql.Schema,
-	projections []sql.Expression,
-	row sql.Row,
-) (sql.Row, error) {
 	var fields = make(sql.Row, len(projections))
 	var secondPass []int
 	for i, expr := range projections {
@@ -404,9 +395,6 @@ func projectRow(
 		}
 		field, fErr := expr.Eval(ctx, row)
 		if fErr != nil {
-			if schema != nil && sql.ErrDataTruncatedForColumn.Is(fErr) {
-				return nil, sql.ErrDataTruncatedForColumn.New(schema[i].Name)
-			}
 			return nil, fErr
 		}
 		field = normalizeNegativeZeros(field)
@@ -415,9 +403,6 @@ func projectRow(
 	for _, index := range secondPass {
 		field, err := projections[index].Eval(ctx, fields)
 		if err != nil {
-			if schema != nil && sql.ErrDataTruncatedForColumn.Is(err) {
-				return nil, sql.ErrDataTruncatedForColumn.New(schema[index].Name)
-			}
 			return nil, err
 		}
 		field = normalizeNegativeZeros(field)
