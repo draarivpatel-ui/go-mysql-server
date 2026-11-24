@@ -709,7 +709,8 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 					return err
 				}
 			}
-			// Copy before mutating so a failed ALTER leaves backing slices untouched.
+			// Copy into a reusable buffer instead of mutating r in place because
+			// engines (and memory savepoints) share the row slices yielded by RowIter.
 			rowBuf = append(rowBuf[:0], r...)
 			rowBuf[oldColIdx] = reencoded
 			r = rowBuf
