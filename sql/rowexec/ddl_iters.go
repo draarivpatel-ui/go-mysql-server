@@ -745,18 +745,6 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 	return true, nil
 }
 
-// evalTableChecks evaluates all enforced, valid CHECK constraints on |tbl|
-// against every row in |tbl|.
-func evalTableChecks(ctx *sql.Context, overrides sql.EngineOverrides, dbName string, tbl sql.Table) error {
-	checks, err := planbuilder.BindEnforcedChecks(ctx, overrides, dbName, tbl, tbl.Schema(ctx))
-	if err != nil || len(checks) == 0 {
-		return err
-	}
-	return forEachTableRow(ctx, tbl, func(r sql.Row) error {
-		return checks.Eval(ctx, r)
-	})
-}
-
 // alterBlockIter lazily executes every clause of a [plan.AlterBlock]
 // atomically under an internal savepoint and evaluates enforced CHECK
 // constraints once after all clauses finish.
@@ -822,31 +810,14 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		pendingCheckDB    sql.Database
 		pendingCheckTable string
 	)
-	flushDeferredChecks := func() error {
-		if pendingCheckTable == "" {
-			return nil
-		}
-		tbl, ok, err := pendingCheckDB.GetTableInsensitive(ctx, pendingCheckTable)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return sql.ErrTableNotFound.New(pendingCheckTable)
-		}
-		if err = evalTableChecks(ctx, i.builder.EngineOverrides, pendingCheckDB.Name(), tbl); err != nil {
-			return err
-		}
-		pendingCheckDB = nil
-		pendingCheckTable = ""
-		return nil
-	}
 	for _, stmt := range i.block.Children() {
-		// Flush deferred checks before a table rename because some engines
-		// apply renames outside savepoint rollback.
-		if _, isRename := stmt.(*plan.RenameTable); isRename {
-			if err = flushDeferredChecks(); err != nil {
+		// Flush deferred checks before a table rename because the memory engine
+		// applies RenameTable outside savepoint rollback.
+		if _, isRename := stmt.(*plan.RenameTable); isRename && pendingCheckTable != "" {
+			if err = i.evalDeferredChecks(ctx, pendingCheckDB, pendingCheckTable); err != nil {
 				return err
 			}
+			pendingCheckDB, pendingCheckTable = nil, ""
 		}
 		iter, err := i.builder.buildNodeExec(ctx, stmt, i.row)
 		if err != nil {
@@ -876,12 +847,33 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		}
 	}
 
-	if err = flushDeferredChecks(); err != nil {
-		return err
+	if pendingCheckTable != "" {
+		if err = i.evalDeferredChecks(ctx, pendingCheckDB, pendingCheckTable); err != nil {
+			return err
+		}
 	}
 
 	i.internalIter = sql.RowsToRowIter(lastRows...)
 	return nil
+}
+
+// evalDeferredChecks evaluates all enforced CHECK constraints on |tableName|
+// in |db| after a deferred-check column rewrite.
+func (i *alterBlockIter) evalDeferredChecks(ctx *sql.Context, db sql.Database, tableName string) error {
+	tbl, ok, err := db.GetTableInsensitive(ctx, tableName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return sql.ErrTableNotFound.New(tableName)
+	}
+	checks, err := planbuilder.BindEnforcedChecks(ctx, i.builder.EngineOverrides, db.Name(), tbl, tbl.Schema(ctx))
+	if err != nil || len(checks) == 0 {
+		return err
+	}
+	return forEachTableRow(ctx, tbl, func(r sql.Row) error {
+		return checks.Eval(ctx, r)
+	})
 }
 
 // forEachTableRow streams every row in |tbl| to |fn|, closing the underlying
