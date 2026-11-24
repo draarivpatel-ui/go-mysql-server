@@ -256,9 +256,6 @@ type ReencodeFunc func(val any) (any, bool, error)
 // The returned [ReencodeFunc] reports whether data was truncated and leaves
 // strict-mode error and warning policy to the caller.
 type ColumnValueReencoder interface {
-	// RequiresReencoding reports whether values stored under the receiver type
-	// must be re-encoded for |dstType|.
-	RequiresReencoding(dstType Type) bool
 	// NewReencoder returns a [ReencodeFunc] that translates stored values from
 	// the receiver type to |dstType|, or (nil, false) when no re-encoding is
 	// needed.

@@ -382,16 +382,6 @@ func (t EnumType) IsSubsetOf(otherType sql.EnumType) bool {
 	return false
 }
 
-// RequiresReencoding implements [sql.ColumnValueReencoder] by reporting whether
-// stored enum ordinals must be re-encoded when altering |t| to |dstType|.
-//
-// It returns false when every member of |t| keeps its ordinal in |dstType|,
-// allowing append-only changes to skip a table rewrite.
-func (t EnumType) RequiresReencoding(dstType sql.Type) bool {
-	newEnum, ok := dstType.(sql.EnumType)
-	return ok && !t.IsSubsetOf(newEnum)
-}
-
 // NewReencoder implements [sql.ColumnValueReencoder] by precomputing an
 // ordinal translation table from |t| to |dstType| by member name, preserving
 // error ordinal 0.
@@ -399,10 +389,10 @@ func (t EnumType) RequiresReencoding(dstType sql.Type) bool {
 // Stored ordinals are position-based, so reordering, inserting, or removing
 // members requires re-encoding by name to preserve logical values.
 func (t EnumType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
-	if !t.RequiresReencoding(dstType) {
+	newEnum, ok := dstType.(sql.EnumType)
+	if !ok || t.IsSubsetOf(newEnum) {
 		return nil, false
 	}
-	newEnum := dstType.(sql.EnumType)
 	remap := make([]uint16, len(t.idxToVal)+1)
 	for i, member := range t.idxToVal {
 		if newIdx := newEnum.IndexOf(member); newIdx > 0 {

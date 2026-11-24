@@ -320,12 +320,12 @@ func (t SetType) Collation() sql.CollationID {
 	return t.collation
 }
 
-// RequiresReencoding implements [sql.ColumnValueReencoder] by reporting whether
-// stored bitmasks must be re-encoded when altering |t| to |dstType|.
+// requiresReencoding reports whether stored bitmasks must be re-encoded when
+// altering |t| to |dstType|.
 //
 // It returns false when every member of |t| keeps its bit position with an
 // equal collation, allowing append-only changes to skip a table rewrite.
-func (t SetType) RequiresReencoding(dstType sql.Type) bool {
+func (t SetType) requiresReencoding(dstType sql.Type) bool {
 	ot, ok := dstType.(SetType)
 	return ok && (!t.collation.Equals(ot.collation) || len(t.members) > len(ot.members) ||
 		!slices.Equal(t.members, ot.members[:len(t.members)]))
@@ -342,7 +342,7 @@ func (t SetType) RequiresReencoding(dstType sql.Type) bool {
 // member is dropped, and a single unmatched member that parses as a valid
 // bitmask of |dstType| converts numerically.
 func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
-	if !t.RequiresReencoding(dstType) {
+	if !t.requiresReencoding(dstType) {
 		return nil, false
 	}
 	ot := dstType.(SetType)

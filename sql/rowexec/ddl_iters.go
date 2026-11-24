@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -669,10 +670,12 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 	}
 
 	var reencode sql.ReencodeFunc
-	if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok {
-		if fn, needed := r.NewReencoder(newCol.Type); needed {
-			reencode = fn
-			rewriteRequired = true
+	if !recomputeGenerated {
+		if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok {
+			if fn, needed := r.NewReencoder(newCol.Type); needed {
+				reencode = fn
+				rewriteRequired = true
+			}
 		}
 	}
 
@@ -695,7 +698,7 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		return false, err
 	}
 
-	if err = i.rewriteTableRows(ctx, rwt, inserter, newSch, projections, checks, oldColIdx, newCol, reencode, recomputeGenerated); err != nil {
+	if err = i.rewriteTableRows(ctx, rwt, inserter, newSch, projections, checks, oldColIdx, newCol.Name, reencode); err != nil {
 		return false, discardAndClose(ctx, inserter, err)
 	}
 
@@ -849,19 +852,19 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 //
 // When |reencode| is non-nil, it re-encodes stored column values on a copied
 // row buffer so a failed ALTER leaves backing slices untouched.
-func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.RewritableTable, inserter sql.RowInserter, newSch sql.Schema, projections []sql.Expression, checks sql.CheckConstraints, oldColIdx int, newCol *sql.Column, reencode sql.ReencodeFunc, recomputeGenerated bool) error {
+func (i *modifyColumnIter) rewriteTableRows(ctx *sql.Context, rwt sql.RewritableTable, inserter sql.RowInserter, newSch sql.Schema, projections []sql.Expression, checks sql.CheckConstraints, oldColIdx int, colName string, reencode sql.ReencodeFunc) error {
 	var rowBuf sql.Row
 	return forEachTableRow(ctx, rwt, func(r sql.Row) error {
-		if reencode != nil && !recomputeGenerated && r[oldColIdx] != nil {
+		if reencode != nil && r[oldColIdx] != nil {
 			reencoded, truncated, err := reencode(r[oldColIdx])
 			if err != nil {
 				return err
 			}
 			if truncated {
 				if sql.LoadSqlMode(ctx).Strict() {
-					return types.ErrDataTruncatedForColumn.New(newCol.Name)
+					return types.ErrDataTruncatedForColumn.New(colName)
 				}
-				ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", newCol.Name)
+				ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s'", colName)
 			}
 			rowBuf = append(rowBuf[:0], r...)
 			rowBuf[oldColIdx] = reencoded
@@ -894,24 +897,18 @@ func forEachTableRow(ctx *sql.Context, tbl sql.Table, fn func(sql.Row) error) (e
 	if err != nil {
 		return err
 	}
-	rowIter := withSafepointPeriodicallyIter(sql.NewTableRowIter(ctx, tbl, partitions))
-	rowIterClosed := false
+	iter := withSafepointPeriodicallyIter(sql.NewTableRowIter(ctx, tbl, partitions))
 	defer func() {
-		if rowIterClosed {
-			return
-		}
-		if closeErr := rowIter.Close(ctx); closeErr != nil && err == nil {
+		if closeErr := iter.Close(ctx); err == nil {
 			err = closeErr
 		}
 	}()
 
 	for {
-		r, err := rowIter.Next(ctx)
-		if err == io.EOF {
-			rowIterClosed = true
+		var r sql.Row
+		if r, err = iter.Next(ctx); err == io.EOF {
 			return nil
-		}
-		if err != nil {
+		} else if err != nil {
 			return err
 		}
 		if err = fn(r); err != nil {
@@ -951,104 +948,47 @@ func modifyColumnInSchema(ctx *sql.Context, schema sql.Schema, name string, colu
 		newIdx = 0
 	}
 
-	// establish a map from old column index to new column index
-	oldToNewIdxMapping := make(map[int]int)
-	var i, j int
-	for j < len(schema) || i < len(schema) {
-		if i == currIdx {
-			oldToNewIdxMapping[i] = newIdx
-			i++
-		} else if j == newIdx {
-			j++
-		} else {
-			oldToNewIdxMapping[i] = j
-			i, j = i+1, j+1
+	// newToOld[j] is the old-schema index of the column at new position j.
+	newToOld := make([]int, 0, len(schema))
+	for i := range schema {
+		if i != currIdx {
+			newToOld = append(newToOld, i)
 		}
 	}
+	newToOld = slices.Insert(newToOld, newIdx, currIdx)
 
-	// Now build the new schema, keeping track of:
-	// 1) The new result schema
-	// 2) A set of projections to translate rows in the old schema to rows in the new schema
 	newSch := make(sql.Schema, len(schema))
 	projections := make([]sql.Expression, len(schema))
-
-	for i := range schema {
-		j := oldToNewIdxMapping[i]
-		oldCol := schema[i]
-		c := oldCol
-		if j == newIdx {
-			c = column
-		}
-		newSch[j] = c
-		projections[j] = getColumnExpression(i, oldCol)
+	for j, i := range newToOld {
+		newSch[j] = schema[i]
+		projections[j] = getColumnExpression(i, schema[i])
 	}
+	newSch[newIdx] = column
 
-	// If a column was renamed or moved, we need to update any column defaults or generated
-	// expressions that refer to it. recomputeCols propagates in schema order
-	// because generated columns can only reference earlier columns.
-	recomputeCols := map[string]bool{}
-	if recomputeGenerated || !schema[currIdx].Type.Equals(column.Type) {
-		recomputeCols[strings.ToLower(column.Name)] = true
-	}
+	// recomputed[j] reports whether column j's values are regenerated with its
+	// new type. Generated columns may only reference earlier columns, so a
+	// single pass in new-schema order propagates recomputation cleanly.
+	recomputed := make([]bool, len(newSch))
+	recomputed[newIdx] = recomputeGenerated || !schema[currIdx].Type.Equals(column.Type)
 
-	refsRecomputedCol := false
-	remapFieldRef := func(ctx *sql.Context, e sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
-		gf, ok := e.(*expression.GetField)
-		if !ok {
-			return e, transform.SameTree, nil
-		}
-
-		colName := gf.Name()
-		// handle column renames
-		if strings.ToLower(colName) == strings.ToLower(name) {
-			colName = column.Name
-		}
-
-		newSchemaIdx := newSch.IndexOfColName(colName)
-		if newSchemaIdx == -1 {
-			return nil, transform.SameTree, sql.ErrColumnNotFound.New(colName)
-		}
-		fieldType, nullable := gf.Type(ctx), gf.IsNullable(ctx)
-		if recomputeCols[strings.ToLower(colName)] {
-			refsRecomputedCol = true
-			// Regenerated values have the new type, including any new ENUM/SET values.
-			fieldType, nullable = newSch[newSchemaIdx].Type, newSch[newSchemaIdx].Nullable
-		}
-
-		return expression.NewGetFieldWithTable(newSchemaIdx, int(gf.TableId()), fieldType, gf.Database(), gf.Table(), colName, nullable), transform.NewTree, nil
-	}
-	for i := range newSch {
-		newCol := newSch[oldToNewIdxMapping[i]]
-		refsRecomputedCol = false
-
-		if newCol.Default != nil {
-			newDefault, _, err := transform.Expr(ctx, newCol.Default.Expr, remapFieldRef)
+	for j, col := range newSch {
+		switch {
+		case col.Default != nil:
+			def, _, err := remapColumnRefs(ctx, col.Default, newSch, name, column.Name, recomputed)
 			if err != nil {
 				return nil, nil, err
 			}
-
-			newDefault, err = newCol.Default.WithChildren(ctx, newDefault)
+			col.Default = def
+		case col.Generated != nil:
+			gen, refsRecomputed, err := remapColumnRefs(ctx, col.Generated, newSch, name, column.Name, recomputed)
 			if err != nil {
 				return nil, nil, err
 			}
-
-			newCol.Default = newDefault.(*sql.ColumnDefaultValue)
-		} else if newCol.Generated != nil {
-			newGenerated, _, err := transform.Expr(ctx, newCol.Generated.Expr, remapFieldRef)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			newGenerated, err = newCol.Generated.WithChildren(ctx, newGenerated)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			newCol.Generated = newGenerated.(*sql.ColumnDefaultValue)
-			if refsRecomputedCol || oldToNewIdxMapping[i] == newIdx {
-				recomputeCols[strings.ToLower(newCol.Name)] = true
-				// Dependent generated columns must use the newly computed values too.
-				projections[oldToNewIdxMapping[i]] = newCol.Generated
+			col.Generated = gen
+			if j == newIdx || refsRecomputed {
+				recomputed[j] = true
+				// Dependent generated columns must see freshly computed values.
+				projections[j] = gen
 			}
 		}
 	}
@@ -1061,6 +1001,41 @@ func modifyColumnInSchema(ctx *sql.Context, schema sql.Schema, name string, colu
 
 	// TODO: do we need col defaults here? probably when changing a column to be non-null?
 	return newSch, projections, nil
+}
+
+// remapColumnRefs rewrites GetFields in |cdv| to |newSch| positions, applying
+// the |oldName| to |newName| rename and refreshing types for |recomputed|
+// columns. It reports whether any recomputed column was referenced.
+func remapColumnRefs(ctx *sql.Context, cdv *sql.ColumnDefaultValue, newSch sql.Schema, oldName, newName string, recomputed []bool) (*sql.ColumnDefaultValue, bool, error) {
+	var refsRecomputed bool
+	expr, _, err := transform.Expr(ctx, cdv.Expr, func(ctx *sql.Context, e sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
+		gf, ok := e.(*expression.GetField)
+		if !ok {
+			return e, transform.SameTree, nil
+		}
+		colName := gf.Name()
+		if strings.EqualFold(colName, oldName) {
+			colName = newName
+		}
+		idx := newSch.IndexOfColName(colName)
+		if idx < 0 {
+			return nil, transform.SameTree, sql.ErrColumnNotFound.New(colName)
+		}
+		typ, nullable := gf.Type(ctx), gf.IsNullable(ctx)
+		if recomputed[idx] {
+			refsRecomputed = true
+			typ, nullable = newSch[idx].Type, newSch[idx].Nullable
+		}
+		return expression.NewGetFieldWithTable(idx, int(gf.TableId()), typ, gf.Database(), gf.Table(), colName, nullable), transform.NewTree, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	out, err := cdv.WithChildren(ctx, expr)
+	if err != nil {
+		return nil, false, err
+	}
+	return out.(*sql.ColumnDefaultValue), refsRecomputed, nil
 }
 
 func createIndex(
