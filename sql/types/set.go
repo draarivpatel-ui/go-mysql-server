@@ -335,39 +335,32 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		return nil, false
 	}
 	ot := dstType.(SetType)
-	maxBits := t.allValuesBitField()
-	emptyBit := t.valToBit[""]
-
-	var (
-		remap           [64]uint64
-		numFallback     [64]uint64
-		numFallbackMask uint64
-		droppedMask     uint64
-	)
+	maxBits, emptyBit := t.allValuesBitField(), t.valToBit[""]
+	var remap, numFallback [64]uint64
+	var numFallbackMask, droppedMask uint64
 	for i, member := range t.members {
 		if bit, ok := ot.lookupBit(member); ok {
 			remap[i] = bit
-		} else {
-			bit := uint64(1) << uint(i)
-			droppedMask |= bit
-			if num, ok := ot.parseBitmask(member); ok {
-				numFallback[i] = num
-				numFallbackMask |= bit
-			}
+			continue
+		}
+		bit := uint64(1) << uint(i)
+		droppedMask |= bit
+		if num, ok := ot.parseBitmask(member); ok {
+			numFallback[i] = num
+			numFallbackMask |= bit
 		}
 	}
-
 	return func(val any) (any, bool, error) {
 		oldBits, ok := val.(uint64)
 		if !ok {
-			converted, inRange, err := t.Convert(context.Background(), val)
+			v, inRange, err := t.Convert(context.Background(), val)
 			if err != nil {
 				return nil, false, err
 			}
 			if inRange != sql.InRange {
 				return uint64(0), true, nil
 			}
-			oldBits = converted.(uint64)
+			oldBits = v.(uint64)
 		}
 		if oldBits > maxBits {
 			return nil, false, sql.ErrInvalidSetValue.New(oldBits)
@@ -379,13 +372,11 @@ func (t SetType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 		if bits.OnesCount64(oldBits) == 1 && oldBits&numFallbackMask != 0 {
 			return numFallback[bits.TrailingZeros64(oldBits)], false, nil
 		}
-
-		truncated := oldBits&droppedMask != 0
 		var remapped uint64
 		for rest := oldBits &^ droppedMask; rest != 0; rest &= rest - 1 {
 			remapped |= remap[bits.TrailingZeros64(rest)]
 		}
-		return remapped, truncated, nil
+		return remapped, oldBits&droppedMask != 0, nil
 	}, true
 }
 

@@ -358,12 +358,12 @@ type modifyColumnIter struct {
 	overrides sql.EngineOverrides
 	runner    sql.StatementRunner
 	runOnce   bool
-	// deferChecks skips CHECK validation during table rewrites. The caller
-	// validates constraints after execution completes.
+	// deferChecks skips CHECK validation during table rewrites so an enclosing
+	// alterBlockIter can validate once after all clauses finish.
 	deferChecks bool
-	// rewrote reports whether this clause rewrote the table so an enclosing
-	// alterBlockIter knows to run deferred CHECK constraints afterwards.
-	rewrote bool
+	// checksDeferred reports whether this clause actually rewrote the table with
+	// CHECK validation skipped (metadata-only alters leave it false).
+	checksDeferred bool
 }
 
 func (i *modifyColumnIter) Next(ctx *sql.Context) (sql.Row, error) {
@@ -704,7 +704,7 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		return false, err
 	}
 
-	i.rewrote = true
+	i.checksDeferred = i.deferChecks
 	return true, nil
 }
 
@@ -824,7 +824,7 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		if err != nil {
 			return err
 		}
-		if mi != nil && mi.rewrote {
+		if mi != nil && mi.checksDeferred {
 			rewrote = mi
 			rewroteTable = mi.alterable.Name()
 		}

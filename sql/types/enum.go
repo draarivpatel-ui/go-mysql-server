@@ -402,23 +402,22 @@ func (t EnumType) NewReencoder(dstType sql.Type) (sql.ReencodeFunc, bool) {
 	return func(val any) (any, bool, error) {
 		oldVal, ok := val.(uint16)
 		if !ok {
-			converted, inRange, err := t.Convert(context.Background(), val)
+			v, inRange, err := t.Convert(context.Background(), val)
 			if err != nil {
 				return nil, false, err
 			}
 			if inRange != sql.InRange {
 				return uint16(0), true, nil
 			}
-			oldVal = converted.(uint16)
+			oldVal = v.(uint16)
 		}
-		oldIdx := int(oldVal)
-		if oldIdx == 0 {
+		if oldVal == 0 {
 			return uint16(0), false, nil
 		}
-		if oldIdx < 0 || oldIdx >= len(remap) || remap[oldIdx] == 0 {
+		if int(oldVal) >= len(remap) || remap[oldVal] == 0 {
 			return uint16(0), true, nil
 		}
-		return remap[oldIdx], false, nil
+		return remap[oldVal], false, nil
 	}, true
 }
 
