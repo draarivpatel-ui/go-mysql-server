@@ -105,8 +105,8 @@ func (e *ColumnDefaultValue) Eval(ctx *Context, r Row) (interface{}, error) {
 			val, inRange, err = e.OutType.Convert(ctx, val)
 			break
 		}
-		reencode, needed := reenc.NewReencoder(e.OutType)
-		if !needed {
+		reencode, ok := reenc.NewReencoder(e.OutType)
+		if !ok {
 			val, inRange, err = e.OutType.Convert(ctx, val)
 			break
 		}

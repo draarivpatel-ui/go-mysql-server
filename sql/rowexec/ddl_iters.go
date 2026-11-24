@@ -670,13 +670,9 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 	}
 
 	var reencode sql.ReencodeFunc
-	if !recomputeGenerated {
-		if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok {
-			if fn, needed := r.NewReencoder(newCol.Type); needed {
-				reencode = fn
-				rewriteRequired = true
-			}
-		}
+	if r, ok := oldCol.Type.(sql.ColumnValueReencoder); ok && !recomputeGenerated {
+		reencode, _ = r.NewReencoder(newCol.Type)
+		rewriteRequired = rewriteRequired || reencode != nil
 	}
 
 	// TODO: codify rewrite requirements
