@@ -36,9 +36,7 @@ type ColumnDefaultValue struct {
 	// Parenthesized indicates whether the value was specified in parens or not; this is typically the opposite of the Literal field,
 	// but they can both be false in the case of now/current_timestamp for datetimes and timestamps.
 	Parenthesized bool
-	// ColName is the name of the owning column, used only in truncation
-	// diagnostics. It is populated when the default is bound to a column and
-	// is not serialized.
+	// ColName is the owning column's name for truncation diagnostics and is not serialized.
 	ColName string
 	// TODO: we need a generated marker here so we can tell them apart during analysis, maybe?
 }
