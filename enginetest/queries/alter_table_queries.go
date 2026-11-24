@@ -1922,6 +1922,52 @@ var AlterTableScripts = []ScriptTest{
 				Query:       "create table t_bad_def (id int primary key, s set('a', 'b') default 'a,z');",
 				ExpectedErr: sql.ErrIncompatibleDefaultType,
 			},
+			{
+				// H1: failing deferred CHECK before RENAME TO must not rename the table or corrupt commit.
+				Query:    "create table t_ren_chk (id int primary key, c set('a', 'x'), check (cast(c as unsigned) <> 2));",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "insert into t_ren_chk values (1, 'a');",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query: "start transaction;",
+			},
+			{
+				Query:       "alter table t_ren_chk modify c set('x', 'a'), rename to t_ren_chk_moved;",
+				ExpectedErr: sql.ErrCheckConstraintViolated,
+			},
+			{
+				Query: "commit;",
+			},
+			{
+				Query:    "select id, c + 0 as mask from t_ren_chk;",
+				Expected: []sql.Row{{1, float64(1)}},
+			},
+			{
+				// H2: rolled-back ADD INDEX must not leave a phantom index with empty storage.
+				Query:    "create table t_idx_rb (id int primary key, c set('a', 'b'), d int, index idx_c (c));",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "insert into t_idx_rb values (1, 'a', 10), (2, 'b', 20);",
+				Expected: []sql.Row{{types.NewOkResult(2)}},
+			},
+			{
+				Query: "start transaction;",
+			},
+			{
+				Query:       "alter table t_idx_rb add index idx_d (d), modify c set('a');",
+				ExpectedErr: types.ErrDataTruncatedForColumn,
+			},
+			{
+				Query: "commit;",
+			},
+			{
+				Query:    "select id from t_idx_rb where d = 20;",
+				Expected: []sql.Row{{2}},
+			},
 		},
 	},
 }

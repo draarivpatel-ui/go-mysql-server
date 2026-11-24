@@ -327,14 +327,13 @@ func startSavepoint(ctx *sql.Context) txSavepoint {
 }
 
 // rollback restores the transaction to this savepoint and releases it.
-func (sp *txSavepoint) rollback(ctx *sql.Context) {
+func (sp *txSavepoint) rollback(ctx *sql.Context) error {
 	if sp.ts == nil {
-		return
+		return nil
 	}
-	if err := sp.ts.RollbackToSavepoint(ctx, ctx.GetTransaction(), sp.name); err != nil {
-		ctx.GetLogger().Warnf("unable to roll back internal savepoint %s: %v", sp.name, err)
-	}
+	err := sp.ts.RollbackToSavepoint(ctx, ctx.GetTransaction(), sp.name)
 	sp.release(ctx)
+	return err
 }
 
 // release discards this savepoint after the guarded work succeeds.

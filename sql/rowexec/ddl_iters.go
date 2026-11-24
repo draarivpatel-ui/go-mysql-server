@@ -16,6 +16,7 @@ package rowexec
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -769,7 +770,9 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 	sp := startSavepoint(ctx)
 	defer func() {
 		if err != nil {
-			sp.rollback(ctx)
+			if rbErr := sp.rollback(ctx); rbErr != nil {
+				err = errors.Join(err, rbErr)
+			}
 		} else {
 			sp.release(ctx)
 		}
@@ -780,7 +783,33 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 		rewrote      *modifyColumnIter
 		rewroteTable string
 	)
+	flushDeferredChecks := func() error {
+		if rewrote == nil || sp.ts == nil {
+			return nil
+		}
+		db := rewrote.m.Database()
+		tbl, ok, err := db.GetTableInsensitive(ctx, rewroteTable)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return sql.ErrTableNotFound.New(rewroteTable)
+		}
+		if err = evalTableChecks(ctx, i.builder.EngineOverrides, db.Name(), tbl); err != nil {
+			return err
+		}
+		rewrote = nil
+		rewroteTable = ""
+		return nil
+	}
 	for _, stmt := range i.block.Children() {
+		// Flush deferred checks before a table rename because some engines
+		// apply renames outside savepoint rollback.
+		if _, isRename := stmt.(*plan.RenameTable); isRename {
+			if err = flushDeferredChecks(); err != nil {
+				return err
+			}
+		}
 		iter, err := i.builder.buildNodeExec(ctx, stmt, i.row)
 		if err != nil {
 			return err
@@ -798,27 +827,14 @@ func (i *alterBlockIter) execute(ctx *sql.Context) (err error) {
 			rewrote = mi
 			rewroteTable = mi.alterable.Name()
 		}
-		if rt, ok := stmt.(*plan.RenameTable); ok && rewrote != nil && len(rt.NewNames) > 0 {
-			rewroteTable = rt.NewNames[len(rt.NewNames)-1]
-		}
 		if len(rows) > 0 {
 			i.repNode = stmt
 			lastRows = rows
 		}
 	}
 
-	if rewrote != nil && sp.ts != nil {
-		db := rewrote.m.Database()
-		tbl, ok, err := db.GetTableInsensitive(ctx, rewroteTable)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return sql.ErrTableNotFound.New(rewroteTable)
-		}
-		if err = evalTableChecks(ctx, i.builder.EngineOverrides, db.Name(), tbl); err != nil {
-			return err
-		}
+	if err = flushDeferredChecks(); err != nil {
+		return err
 	}
 
 	i.internalIter = sql.RowsToRowIter(lastRows...)
