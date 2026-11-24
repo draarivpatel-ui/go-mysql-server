@@ -968,13 +968,13 @@ func modifyColumnInSchema(ctx *sql.Context, schema sql.Schema, name string, colu
 	for j, col := range newSch {
 		switch {
 		case col.Default != nil:
-			def, _, err := remapColumnRefs(ctx, col.Default, newSch, name, column.Name, recomputed)
+			def, _, err := updateDefaultFieldRefs(ctx, col.Default, newSch, name, column.Name, recomputed)
 			if err != nil {
 				return nil, nil, err
 			}
 			col.Default = def
 		case col.Generated != nil:
-			gen, refsRecomputed, err := remapColumnRefs(ctx, col.Generated, newSch, name, column.Name, recomputed)
+			gen, refsRecomputed, err := updateDefaultFieldRefs(ctx, col.Generated, newSch, name, column.Name, recomputed)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -997,10 +997,11 @@ func modifyColumnInSchema(ctx *sql.Context, schema sql.Schema, name string, colu
 	return newSch, projections, nil
 }
 
-// remapColumnRefs rewrites GetFields in |cdv| to |newSch| positions, applying
-// the |oldName| to |newName| rename and refreshing types for |recomputed|
-// columns. It reports whether any recomputed column was referenced.
-func remapColumnRefs(ctx *sql.Context, cdv *sql.ColumnDefaultValue, newSch sql.Schema, oldName, newName string, recomputed []bool) (*sql.ColumnDefaultValue, bool, error) {
+// updateDefaultFieldRefs updates GetField references in |cdv| to |newSch|
+// positions, applying the |oldName| to |newName| rename and refreshing types
+// for |recomputed| columns. It reports whether any recomputed column was
+// referenced.
+func updateDefaultFieldRefs(ctx *sql.Context, cdv *sql.ColumnDefaultValue, newSch sql.Schema, oldName, newName string, recomputed []bool) (*sql.ColumnDefaultValue, bool, error) {
 	var refsRecomputed bool
 	expr, _, err := transform.Expr(ctx, cdv.Expr, func(ctx *sql.Context, e sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
 		gf, ok := e.(*expression.GetField)
